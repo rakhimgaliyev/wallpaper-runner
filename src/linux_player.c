@@ -21,7 +21,8 @@ typedef struct {
     gboolean verbose;
     GtkApplication *app;
     GtkWidget *window;
-    GtkWidget *video;
+    GtkWidget *media_widget;
+    GtkMediaStream *stream;
 } AppState;
 
 static void log_line(AppState *state, const char *level, const char *message) {
@@ -184,21 +185,16 @@ static void on_stream_ended_notify(GtkMediaStream *stream, GParamSpec *pspec, gp
 
 static gboolean playback_watchdog(gpointer user_data) {
     AppState *state = (AppState *)user_data;
-    if (state == NULL || state->video == NULL) {
+    if (state == NULL || state->stream == NULL) {
         return G_SOURCE_CONTINUE;
     }
 
-    GtkMediaStream *stream = gtk_video_get_media_stream(GTK_VIDEO(state->video));
-    if (stream == NULL) {
-        return G_SOURCE_CONTINUE;
-    }
-
-    const GError *err = gtk_media_stream_get_error(stream);
+    const GError *err = gtk_media_stream_get_error(state->stream);
     if (err != NULL) {
         return G_SOURCE_CONTINUE;
     }
 
-    restart_stream_if_needed(stream, state);
+    restart_stream_if_needed(state->stream, state);
     return G_SOURCE_CONTINUE;
 }
 
@@ -214,14 +210,11 @@ static gboolean on_unix_signal(gpointer user_data) {
 static void on_shutdown(GApplication *application, gpointer user_data) {
     (void)application;
     AppState *state = (AppState *)user_data;
-    if (state == NULL || state->video == NULL) {
+    if (state == NULL || state->stream == NULL) {
         return;
     }
 
-    GtkMediaStream *stream = gtk_video_get_media_stream(GTK_VIDEO(state->video));
-    if (stream != NULL) {
-        gtk_media_stream_pause(stream);
-    }
+    gtk_media_stream_pause(state->stream);
 }
 
 static void on_activate(GtkApplication *app, gpointer user_data) {
@@ -254,24 +247,23 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
         g_object_unref(monitor);
     }
 
-    state->video = gtk_video_new_for_filename(state->video_path);
-    gtk_video_set_autoplay(GTK_VIDEO(state->video), TRUE);
-    gtk_video_set_loop(GTK_VIDEO(state->video), TRUE);
-    GtkMediaStream *video_stream = gtk_video_get_media_stream(GTK_VIDEO(state->video));
-    if (video_stream != NULL) {
-        gtk_media_stream_set_muted(video_stream, TRUE);
-    }
-    gtk_widget_set_hexpand(state->video, TRUE);
-    gtk_widget_set_vexpand(state->video, TRUE);
+    /*
+     * Use GtkPicture + GtkMediaFile to render frames without GtkVideo controls.
+     * GtkVideo may surface a bottom transport bar on pointer interaction.
+     */
+    state->stream = GTK_MEDIA_STREAM(gtk_media_file_new_for_filename(state->video_path));
+    gtk_media_stream_set_muted(state->stream, TRUE);
+    g_signal_connect(state->stream, "notify::error", G_CALLBACK(on_stream_error_notify), state);
+    g_signal_connect(state->stream, "notify::ended", G_CALLBACK(on_stream_ended_notify), state);
 
-    GtkMediaStream *stream = gtk_video_get_media_stream(GTK_VIDEO(state->video));
-    if (stream != NULL) {
-        g_signal_connect(stream, "notify::error", G_CALLBACK(on_stream_error_notify), state);
-        g_signal_connect(stream, "notify::ended", G_CALLBACK(on_stream_ended_notify), state);
-    }
-
-    gtk_window_set_child(GTK_WINDOW(state->window), state->video);
+    state->media_widget = gtk_picture_new_for_paintable(GDK_PAINTABLE(state->stream));
+    gtk_picture_set_can_shrink(GTK_PICTURE(state->media_widget), TRUE);
+    gtk_picture_set_keep_aspect_ratio(GTK_PICTURE(state->media_widget), FALSE);
+    gtk_widget_set_hexpand(state->media_widget, TRUE);
+    gtk_widget_set_vexpand(state->media_widget, TRUE);
+    gtk_window_set_child(GTK_WINDOW(state->window), state->media_widget);
     gtk_window_present(GTK_WINDOW(state->window));
+    gtk_media_stream_play(state->stream);
 
     g_timeout_add_seconds(2, playback_watchdog, state);
 
